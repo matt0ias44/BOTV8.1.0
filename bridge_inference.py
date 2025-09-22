@@ -27,6 +27,7 @@ from transformers import AutoTokenizer, AutoModel
 
 from fetch_article_bodies import fetch_article_body
 from live.feature_builder import FeatureSource, LiveFeatureBuilder
+from predictions_schema import EXPORTED_FEATURE_KEYS, PREDICTIONS_HEADER
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "./models/bert_v7_1_plus"))
@@ -48,15 +49,6 @@ EXPECTED_RAW_COLUMNS = [
     "news_id",
 ]
 
-
-EXPORTED_FEATURE_KEYS = [
-    "feat_atr_30m_pct",
-    "feat_atr_60m_pct",
-    "feat_realized_vol_60m",
-    "feat_realized_vol_60m_annual",
-    "feat_vol_z_60m",
-    "feat_volume_rate_30m",
-]
 
 MAX_ARTICLE_CACHE = 400
 
@@ -467,40 +459,37 @@ def magnitude_bucket(thresholds: Dict[str, Dict[str, float]] | None, value: floa
 
 
 def ensure_output_header():
-    if OUTPUT_CSV.exists():
+    expected_header = ",".join(PREDICTIONS_HEADER)
+
+    if not OUTPUT_CSV.exists():
+        OUTPUT_CSV.write_text(expected_header + "\n", encoding="utf-8")
         return
-    header = [
-        "news_id",
-        "datetime_paris",
-        "datetime_utc",
-        "prediction",
-        "prob_bear",
-        "prob_neut",
-        "prob_bull",
-        "confidence",
-        "ret_pred",
-        "ret_30m_pred",
-        "ret_120m_pred",
-        "mag_pred",
-        "mag_30m_pred",
-        "mag_120m_pred",
-        "mag_bucket",
-        "features_status",
-        "title",
-        "summary",
-        "url",
-        "source",
-        "titles_joined",
-        "body_concat",
-        "text_source",
-        "text_chars",
-        "article_status",
-        "article_found",
-        "article_chars",
-        "processed_at",
-    ]
-    header.extend(EXPORTED_FEATURE_KEYS)
-    OUTPUT_CSV.write_text(",".join(header) + "\n", encoding="utf-8")
+
+    try:
+        with OUTPUT_CSV.open("r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError as exc:
+        print(f"[WARN] unable to read {OUTPUT_CSV}: {exc}")
+        return
+
+    current_line = lines[0].strip() if lines else ""
+    current_header = [part.strip() for part in current_line.split(",") if part.strip()]
+
+    if current_header == PREDICTIONS_HEADER:
+        if not lines:
+            OUTPUT_CSV.write_text(expected_header + "\n", encoding="utf-8")
+        return
+
+    tmp_path = OUTPUT_CSV.with_suffix(".tmp")
+    with tmp_path.open("w", encoding="utf-8") as fh:
+        fh.write(expected_header + "\n")
+        if len(lines) > 1:
+            fh.writelines(lines[1:])
+    tmp_path.replace(OUTPUT_CSV)
+    print(
+        f"[WARN] rewrote {OUTPUT_CSV} header to expected schema "
+        f"({len(current_header)} cols -> {len(PREDICTIONS_HEADER)})."
+    )
 
 
 def load_processed_ids() -> List[str]:
