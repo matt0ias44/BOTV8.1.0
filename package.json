@@ -1,0 +1,22 @@
+{
+  "name": "sentiment_trading_ai_bot",
+  "version": "1.0.0",
+  "description": "Ce projet a pour but de créer un bot de trading basé sur l'analyse de sentiment des news crypto.",
+  "main": "puppeteer_hook.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "crypto": "^1.0.1",
+    "fs-extra": "^11.3.2",
+    "node-fetch": "^3.3.2",
+    "p-queue": "^8.1.1",
+    "puppeteer": "^24.22.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "type": "module"
+}
