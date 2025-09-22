@@ -30,6 +30,8 @@ REFRESH_SEC = 2
 CONF_OPEN = 0.62
 CONF_CLOSE = 0.55
 CONF_BASELINE = 0.50
+CONF_NEUTRAL_EXIT = 0.78
+HOLD_NEUTRAL_MIN_SEC = 240
 MIN_COOLDOWN_SEC = 60
 BASE_POSITION_USD = 1000
 MAX_LEVERAGE = 8
@@ -49,6 +51,27 @@ LABELS = ["bearish", "neutral", "bullish"]
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat()
+
+
+def position_age_seconds(position: Optional[Dict]) -> Optional[float]:
+    if not position:
+        return None
+    entry_ts_epoch = position.get("entry_ts_epoch")
+    if entry_ts_epoch is not None:
+        try:
+            return max(0.0, time.time() - float(entry_ts_epoch))
+        except (TypeError, ValueError):
+            pass
+    entry_ts = position.get("entry_ts")
+    if not entry_ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(entry_ts)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return max(0.0, time.time() - dt.timestamp())
 
 
 def safe_float(value) -> Optional[float]:
@@ -196,6 +219,7 @@ def init_state() -> Dict:
                     data.setdefault("equity_curve", [[now_iso(), data.get("equity", 10000.0)]])
                     data.setdefault("last_pred_id", None)
                     data.setdefault("last_signal", None)
+                    data.setdefault("strategy_settings", {})
                     return data
         except Exception as exc:
             print(f"[WARN] unable to read {STATE_FILE}: {exc}")
@@ -207,6 +231,7 @@ def init_state() -> Dict:
         "equity_curve": [[now_iso(), 10000.0]],
         "last_pred_id": None,
         "last_signal": None,
+        "strategy_settings": {},
     }
 
 
@@ -325,6 +350,7 @@ def open_position(state: Dict, side: str, price: float, title: str, plan: Dict) 
         "entry": float(price),
         "size": float(size),
         "entry_ts": now_iso(),
+        "entry_ts_epoch": time.time(),
         "tp": float(tp),
         "sl": float(sl),
         "title": title[:160],
@@ -381,6 +407,17 @@ def main():
     thresholds = load_thresholds()
     last_action_ts = 0.0
     seen_ids = set()
+
+    state.setdefault("strategy_settings", {})
+    state["strategy_settings"].update(
+        {
+            "CONF_OPEN": CONF_OPEN,
+            "CONF_CLOSE": CONF_CLOSE,
+            "CONF_NEUTRAL_EXIT": CONF_NEUTRAL_EXIT,
+            "HOLD_NEUTRAL_MIN_SEC": HOLD_NEUTRAL_MIN_SEC,
+            "MIN_COOLDOWN_SEC": MIN_COOLDOWN_SEC,
+        }
+    )
 
     while True:
         time.sleep(REFRESH_SEC)
@@ -444,6 +481,9 @@ def main():
                     "title": title[:200],
                     "url": url,
                     "features_status": str(last_row.get("features_status", "")),
+                    "position_age_sec": position_age_seconds(state.get("position")),
+                    "neutral_exit_threshold": CONF_NEUTRAL_EXIT,
+                    "neutral_exit_min_hold_sec": HOLD_NEUTRAL_MIN_SEC,
                 }
                 if plan:
                     signal_info.update(
@@ -467,9 +507,34 @@ def main():
                     else:
                         pos = state["position"]
                         side = pos["side"]
-                        if pred == "neutral" and confidence >= CONF_CLOSE and price:
-                            close_position(state, price, reason="CLOSE neutral")
-                            last_action_ts = now_s
+                        if pred == "neutral":
+                            hold_seconds = position_age_seconds(pos)
+                            neutral_conf_ok = confidence >= CONF_NEUTRAL_EXIT
+                            neutral_hold_ok = (
+                                HOLD_NEUTRAL_MIN_SEC <= 0
+                                or hold_seconds is None
+                                or hold_seconds >= HOLD_NEUTRAL_MIN_SEC
+                            )
+                            neutral_allowed = price is not None and neutral_conf_ok and neutral_hold_ok
+                            block_reason = None
+                            if not neutral_conf_ok:
+                                block_reason = "confidence"
+                            elif not neutral_hold_ok:
+                                block_reason = "min_hold"
+                            if state.get("last_signal"):
+                                state["last_signal"].update(
+                                    {
+                                        "neutral_exit_allowed": neutral_allowed,
+                                        "neutral_conf_ok": neutral_conf_ok,
+                                        "neutral_hold_ok": neutral_hold_ok,
+                                        "neutral_hold_seconds": hold_seconds,
+                                        "neutral_exit_block_reason": block_reason,
+                                        "position_age_sec": hold_seconds,
+                                    }
+                                )
+                            if neutral_allowed:
+                                close_position(state, price, reason="CLOSE neutral")
+                                last_action_ts = now_s
                         elif side == "long" and pred == "bearish" and confidence >= CONF_OPEN and price:
                             close_position(state, price, reason="CLOSE flip")
                             last_action_ts = now_s
