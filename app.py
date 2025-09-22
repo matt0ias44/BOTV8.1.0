@@ -19,6 +19,8 @@ import streamlit as st
 from pytz import timezone as pytz_timezone
 from streamlit_autorefresh import st_autorefresh
 
+from predictions_schema import PREDICTIONS_HEADER
+
 warnings.filterwarnings("ignore", message=".*Styler.applymap.*", category=FutureWarning)
 
 TZ_PARIS = pytz_timezone("Europe/Paris")
@@ -48,6 +50,8 @@ DEFAULT_STATE = {
     "last_pred_id": None,
     "last_signal": None,
 }
+
+EXPECTED_PREDICTION_COLUMNS: tuple[str, ...] = tuple(PREDICTIONS_HEADER)
 
 
 def humanize_delta(delta: timedelta) -> str:
@@ -149,10 +153,51 @@ def load_state() -> Dict[str, Any]:
     return DEFAULT_STATE.copy()
 
 
+def ensure_predictions_schema() -> None:
+    expected_header = ",".join(EXPECTED_PREDICTION_COLUMNS)
+
+    if not PREDICTIONS_CSV.exists():
+        return
+
+    try:
+        with PREDICTIONS_CSV.open("r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError as exc:
+        st.warning(f"Impossible de lire {PREDICTIONS_CSV.name} : {exc}")
+        return
+
+    current_line = lines[0].strip() if lines else ""
+    current_header = [part.strip() for part in current_line.split(",") if part.strip()]
+    expected_list = list(EXPECTED_PREDICTION_COLUMNS)
+
+    if current_header == expected_list:
+        if not lines:
+            try:
+                PREDICTIONS_CSV.write_text(expected_header + "\n", encoding="utf-8")
+            except OSError as exc:
+                st.warning(f"Impossible de mettre à jour {PREDICTIONS_CSV.name} : {exc}")
+        return
+
+    tmp_path = PREDICTIONS_CSV.with_suffix(".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as fh:
+            fh.write(expected_header + "\n")
+            if len(lines) > 1:
+                fh.writelines(lines[1:])
+        tmp_path.replace(PREDICTIONS_CSV)
+    except OSError as exc:
+        st.warning(f"Impossible de réécrire {PREDICTIONS_CSV.name} : {exc}")
+        tmp_path.unlink(missing_ok=True)
+        return
+
+    st.info("Entête de live_predictions.csv mis à jour pour le nouveau schéma.")
+
+
 def load_predictions() -> pd.DataFrame:
     if not PREDICTIONS_CSV.exists():
         return pd.DataFrame()
     try:
+        ensure_predictions_schema()
         df = pd.read_csv(PREDICTIONS_CSV)
     except Exception as exc:
         st.error(f"Unable to read {PREDICTIONS_CSV}: {exc}")
@@ -162,6 +207,18 @@ def load_predictions() -> pd.DataFrame:
         df["datetime_paris"] = pd.to_datetime(df["datetime_paris"], utc=True, errors="coerce").dt.tz_convert(TZ_PARIS)
     if "datetime_utc" in df.columns:
         df["datetime_utc"] = pd.to_datetime(df["datetime_utc"], utc=True, errors="coerce")
+    if "processed_at" in df.columns:
+        df["processed_at"] = pd.to_datetime(df["processed_at"], utc=True, errors="coerce")
+
+    if "article_found" in df.columns:
+        df["article_found"] = df["article_found"].map(_as_bool)
+    if "article_chars" in df.columns:
+        df["article_chars"] = pd.to_numeric(df["article_chars"], errors="coerce")
+
+    if "datetime_utc" in df.columns and df["datetime_utc"].notna().any():
+        df = df.sort_values("datetime_utc").reset_index(drop=True)
+    elif "processed_at" in df.columns:
+        df = df.sort_values("processed_at").reset_index(drop=True)
     return df
 
 
